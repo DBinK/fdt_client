@@ -1,7 +1,9 @@
-# pytracking_server.py
+# fdt_server.py
 import json
 import threading
 import time
+import shutil
+from pathlib import Path
 
 import sys
 import os
@@ -12,95 +14,114 @@ import zmq
 import numpy as np
 from loguru import logger
 
-from interfaces.ob_wrapper import TrackerDiMP_create
+# === 引入新的 Tracker ===
+from tracker import FoundationPoseGDSAMTracker
 
-logger.remove()  # 移除默认的处理器
-logger.add(sys.stderr, level="INFO")  # 添加新的处理器，级别为DEBUG
-# logger.add(sys.stderr, level="DEBUG")  # 添加新的处理器，级别为DEBUG
+logger.remove()
+logger.add(sys.stderr, level="INFO")
+
+# 临时文件存储路径
+TEMP_DIR = Path("tmp_sessions")
+if TEMP_DIR.exists():
+    shutil.rmtree(TEMP_DIR)
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
 
 class SessionThread(threading.Thread):
-    def __init__(self, session_id, color_frame, depth_frame, object_name, cam_K, vis=False):
+    def __init__(self, session_id, color_frame, depth_frame, text_prompt, mesh_path, cam_K, vis=False):
         super().__init__()
         self.session_id = session_id
         self.color_frame = color_frame
         self.depth_frame = depth_frame
-        self.object_name = object_name
+        self.text_prompt = text_prompt
+        self.mesh_path = mesh_path  # 这是本地保存的临时文件路径
         self.cam_K = cam_K
         self.vis = vis
+        
         self.tracker = None
         self.initialized = False
-        self.lock = threading.Lock()
         self.stop_event = threading.Event()
+        
+        # 结果传递
         self.result = None
         self.result_available = threading.Event()
+        
+        # 调试目录
+        self.debug_dir = TEMP_DIR / session_id / "debug"
 
     def run(self):
         try:
-            # 初始化跟踪器
-            self.tracker = TrackerDiMP_create()
-            # 使用彩色帧和深度帧初始化跟踪器（具体初始化参数可能需要根据ob_wrapper中的实现调整）
-            self.tracker.init(self.color_frame, self.depth_frame, self.object_name, self.cam_K)
-            self.initialized = True
+            logger.info(f"会话 {self.session_id} 初始化 FoundationPose...")
             
-            # 通知主线程初始化完成
-            self.result = {"status": "ok"}
-            self.result_available.set()
+            # 初始化跟踪器对象
+            self.tracker = FoundationPoseGDSAMTracker(
+                text_prompt=self.text_prompt,
+                mesh_file=str(self.mesh_path),
+                K=self.cam_K,
+                show_vis=False,     # 服务端不弹窗，太慢且无法传输
+                save_vis=self.vis,  # 如果开启vis，则保存图片到debug目录
+                save_3d=False,
+                debug_dir=str(self.debug_dir),
+                device="cuda"
+            )
             
-            # 持续处理更新请求
-            while not self.stop_event.is_set():
-                time.sleep(0.001)  # 避免过度占用CPU
+            # 执行第一帧注册
+            success, pose = self.tracker.init(self.color_frame, self.depth_frame)
+            
+            if success:
+                # 获取 BBox (8个顶点) 供客户端画图
+                bbox_corners = self.tracker.get_bbox_corners()
                 
+                self.initialized = True
+                self.result = {
+                    "status": "ok",
+                    "pose": pose.flatten().tolist(),     # 转换为列表 (16,)
+                    "bbox": bbox_corners.tolist()        # 转换为列表 (8, 3)
+                }
+            else:
+                self.result = {"status": "error", "msg": "Object not detected in first frame"}
+
         except Exception as e:
-            logger.error(f"会话 {self.session_id} 初始化跟踪器失败: {e}")
+            logger.error(f"会话 {self.session_id} 初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
             self.result = {"status": "error", "msg": str(e)}
+        finally:
             self.result_available.set()
+            
+            # 保持线程运行以处理后续请求（实际上这个线程模型里，run跑完init就没事做了，
+            # 只要 tracker 实例还在内存里，主线程可以直接调用 tracker.update）
+            # 为了保持对象存活，我们在主类里持有 session_thread 实例
+            pass
 
     def update(self, color_frame, depth_frame):
+        """主线程调用的同步更新方法"""
         if not self.initialized or self.tracker is None:
             return None
 
         try:
-            # 调用实际的追踪器更新方法，传入彩色和深度帧
-            success, bbox = self.tracker.update(color_frame, depth_frame)
-
-            # 根据vis参数决定是否显示调试窗口
-            if self.vis:
-                if color_frame is not None:
-                    cv2.namedWindow(self.session_id, cv2.WINDOW_NORMAL)
-
-                if success and bbox is not None:
-                    # 绘制边界框
-                    x, y, w, h = [int(v) for v in bbox]
-                    cv2.rectangle(color_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.putText(color_frame, "DiMP", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
-                    
-                    if self.vis:
-                        cv2.imshow(self.session_id, color_frame)
-                        cv2.waitKey(1)
-                    return bbox
-                
-                else:
-                    if self.vis:
-                        cv2.putText(color_frame, "追踪失败", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-                        cv2.imshow(self.session_id, color_frame)
-                        cv2.waitKey(1)
-                    return None
+            success, pose = self.tracker.update(color_frame, depth_frame)
+            
+            if success:
+                # 返回 Pose (4x4 -> flattened list)
+                return pose.flatten().tolist()
             else:
-                # 不显示调试窗口，直接返回结果
-                if success and bbox is not None:
-                    return bbox
-                else:
-                    return None
+                return None
             
         except Exception as e:
-            logger.info(f"会话 {self.session_id} 更新跟踪器失败: {e}")
+            logger.error(f"会话 {self.session_id} 更新失败: {e}")
             return None
 
     def stop(self):
         self.stop_event.set()
-        # 只有在启用调试可视化时才需要销毁窗口
-        if self.vis:
-            cv2.destroyWindow(self.session_id)
+        # 清理临时文件
+        try:
+            session_dir = TEMP_DIR / self.session_id
+            if session_dir.exists():
+                shutil.rmtree(session_dir)
+                logger.info(f"清理会话临时文件: {session_dir}")
+        except Exception as e:
+            logger.error(f"清理文件失败: {e}")
 
 
 class TrackerServer:
@@ -119,183 +140,171 @@ class TrackerServer:
         logger.info(f"监听地址: {self.address}")
 
     def decode_frame(self, buf, dtype=np.uint8):
-        """解码JPEG/PNG为numpy图像或直接返回原始数据"""
+        """解码图像"""
+        if buf is None or len(buf) == 0:
+            return None
         if dtype == np.uint16:
-            # 对于uint16深度图，直接恢复原始数据
-            return np.frombuffer(buf, dtype=np.uint16).reshape((480, 640))  # 根据实际情况调整形状
+            # 深度图：假设是 raw bytes (width * height * 2) 或者 png
+            # 客户端代码 send_multipart 发送的是 frame.tobytes() (raw)
+            # 所以这里直接 frombuffer 并 reshape
+            # TODO: 这是一个硬编码的风险点，需要知道分辨率。
+            # 建议：客户端在 JSON 中带上 width/height，或者统一用 png 编码深度图
+            try:
+                # 尝试作为图像解码 (PNG)
+                arr = np.frombuffer(buf, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    return img
+            except:
+                pass
+            
+            # 回退到 Raw buffer (假设 640x480) - 这是一个潜在的Bug源
+            # 如果客户端改用 tobytes()，必须保证分辨率一致
+            # 根据 fdt_client.py: return frame.tobytes() -> 这是 raw bytes
+            # 我们需要知道分辨率。这里暂时假设 640x480
+            return np.frombuffer(buf, dtype=np.uint16).reshape((480, 640))
         else:
-            # 对于普通彩色图像，使用JPEG解码
+            # 彩色图：jpg 解码
             np_arr = np.frombuffer(buf, dtype=dtype)
             return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    def init_tracker(self, session_id, color_frame, depth_frame, object_name, cam_K):
-        """
-        初始化追踪器线程
-        """
+    def save_temp_mesh(self, session_id, mesh_bytes):
+        """将接收到的 mesh 二进制写入临时文件"""
+        session_dir = TEMP_DIR / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        mesh_path = session_dir / "uploaded_mesh.obj"
+        with open(mesh_path, "wb") as f:
+            f.write(mesh_bytes)
+        return mesh_path
+
+    def handle_init_command(self, parts):
+        """处理 Init: [json, mesh_bytes, color_bytes, depth_bytes]"""
+        if len(parts) != 4:
+            return {"status": "error", "msg": "Init requires 4 parts: [meta, mesh, color, depth]"}
+
+        meta_str, mesh_buf, color_buf, depth_buf = parts
+        try:
+            msg = json.loads(meta_str.decode("utf-8"))
+        except:
+            return {"status": "error", "msg": "invalid json"}
+
+        session_id = msg.get("session_id")
+        text_prompt = msg.get("text_prompt")
+        cam_K_list = msg.get("cam_K")
+
+        if not all([session_id, text_prompt, cam_K_list]):
+            return {"status": "error", "msg": "Missing required fields"}
+
+        # 解码图像
+        color_frame = self.decode_frame(color_buf, np.uint8)
+        depth_frame = self.decode_frame(depth_buf, np.uint16)
+        
+        if color_frame is None or depth_frame is None:
+            return {"status": "error", "msg": "Frame decode failed"}
+
+        # 保存 Mesh
+        try:
+            mesh_path = self.save_temp_mesh(session_id, mesh_buf)
+        except Exception as e:
+            return {"status": "error", "msg": f"Save mesh failed: {e}"}
+
+        # 启动会话
+        cam_K = np.array(cam_K_list) # 转换为 numpy
+        
         with self.sessions_lock:
-            # 如果会话已存在，先停止它
             if session_id in self.sessions:
                 self.sessions[session_id].stop()
-                self.sessions[session_id].join()
-                
-            # 创建并启动新的会话线程
-            session_thread = SessionThread(session_id, color_frame, depth_frame, object_name, cam_K, self.vis)
+            
+            session_thread = SessionThread(
+                session_id, color_frame, depth_frame, 
+                text_prompt, mesh_path, cam_K, self.vis
+            )
             session_thread.start()
             self.sessions[session_id] = session_thread
-
-            logger.info(f"开始新任务: {object_name}, {session_id}")
             
-            # 等待初始化结果
+            # 等待初始化完成
             session_thread.result_available.wait()
             return session_thread.result
 
-    def update_tracker(self, session_id, color_frame, depth_frame):
-        """
-        更新追踪器
-        """
+    def handle_update_command(self, parts):
+        """处理 Update: [json, color_bytes, depth_bytes]"""
+        if len(parts) != 3:
+            return {"status": "error", "msg": "Update requires 3 parts"}
+            
+        meta_str, color_buf, depth_buf = parts
+        try:
+            msg = json.loads(meta_str.decode("utf-8"))
+        except:
+            return {"status": "error", "msg": "invalid json"}
+            
+        session_id = msg.get("session_id")
+        
         with self.sessions_lock:
             if session_id not in self.sessions:
-                return None
-                
+                return {"status": "error", "msg": "Session not found"}
             session_thread = self.sessions[session_id]
-            
+
         if not session_thread.initialized:
-            return None
-            
-        return session_thread.update(color_frame, depth_frame)
+            return {"status": "error", "msg": "Tracker not initialized"}
 
-    def release_tracker(self, session_id):
-        """
-        释放指定会话的跟踪器
-        """
-        with self.sessions_lock:
-            if session_id in self.sessions:
-                self.sessions[session_id].stop()
-                self.sessions[session_id].join()
-                del self.sessions[session_id]
-                return True
-        return False
+        # 解码图像
+        color_frame = self.decode_frame(color_buf, np.uint8)
+        depth_frame = self.decode_frame(depth_buf, np.uint16)
 
-    def handle_init_command(self, color_frame, depth_frame, msg):
-        if color_frame is None or depth_frame is None:
-            return {"status": "error", "msg": "failed to decode frames"}
+        pose_list = session_thread.update(color_frame, depth_frame)
         
-        session_id = msg.get("session_id")
-        if not session_id:
-            return {"status": "error", "msg": "session_id is required"}
-        
-        object_name = msg.get("object_name", "")
-        cam_K = msg.get("cam_K", [])
-        
-        result = self.init_tracker(session_id, color_frame, depth_frame, object_name, cam_K)
-        return result
-
-    def handle_update_command(self, color_frame, depth_frame, msg):
-        if color_frame is None or depth_frame is None:
-            return {"status": "error", "msg": "failed to decode frames"}
-        
-        session_id = msg.get("session_id")
-        if not session_id:
-            return {"status": "error", "msg": "session_id is required"}
-            
-        bbox = self.update_tracker(session_id, color_frame, depth_frame)
-        if bbox is not None:
-            return {"status": "ok", "bbox": bbox}
+        if pose_list is not None:
+            return {"status": "ok", "pose": pose_list}
         else:
-            return {"status": "error", "msg": "tracker update failed"}
+            return {"status": "error", "msg": "Tracking lost"}
 
     def handle_release_command(self, msg):
         session_id = msg.get("session_id")
-        if not session_id:
-            return {"status": "error", "msg": "session_id is required"}
-            
-        success = self.release_tracker(session_id)
-        if success:
-            return {"status": "ok"}
-        else:
-            return {"status": "error", "msg": "failed to release tracker"}
+        with self.sessions_lock:
+            if session_id in self.sessions:
+                self.sessions[session_id].stop()
+                del self.sessions[session_id]
+                return {"status": "ok"}
+        return {"status": "error", "msg": "Session not found"}
 
     def run(self):
         try:
             while True:
-                # multipart 接收: [json字符串, 彩色帧二进制, 深度帧二进制]
+                # 接收 multipart
                 parts = self.socket.recv_multipart()
                 
-                # 检查接收到的部分数量 - 新协议应有3部分：JSON元数据，彩色帧，深度帧
-                if len(parts) != 3:
-                    logger.error(f"接收到错误的消息部分数量: {len(parts)}, 期望: 3")
-                    self.socket.send_json({"status": "error", "msg": "invalid message format"})
-                    continue
-                    
-                meta_str, color_frame_buf, depth_frame_buf = parts
-                logger.debug(f"接收到消息，元数据长度: {len(meta_str)}, 彩色帧数据长度: {len(color_frame_buf)}, 深度帧数据长度: {len(depth_frame_buf)}")
-                
+                # 先解析第一部分 JSON 确定命令类型
                 try:
-                    msg = json.loads(meta_str.decode("utf-8"))
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON解码失败: {e}")
-                    self.socket.send_json({"status": "error", "msg": "invalid json format"})
+                    meta_json = json.loads(parts[0].decode("utf-8"))
+                    cmd = meta_json.get("cmd")
+                except Exception as e:
+                    logger.error(f"JSON Parse Error: {e}")
+                    self.socket.send_json({"status": "error", "msg": "Invalid metadata"})
                     continue
-                    
-                cmd = msg.get("cmd", "unknown")
-                logger.debug(f"收到命令: {cmd}")
+
+                logger.debug(f"收到命令: {cmd}, Parts数量: {len(parts)}")
+
+                response = {"status": "error", "msg": "Unknown command"}
 
                 if cmd == "init":
-                    # 解码彩色和深度帧
-                    color_frame = self.decode_frame(color_frame_buf, dtype=np.uint8 if len(color_frame_buf) < 1000000 else np.uint8)
-                    # 确定深度帧的数据类型并解码
-                    depth_frame = self.decode_frame(depth_frame_buf, dtype=np.uint16)
-                    
-                    if color_frame is None or depth_frame is None:
-                        logger.error("帧解码失败")
-                        self.socket.send_json({"status": "error", "msg": "failed to decode frames"})
-                        continue
-                        
-                    response = self.handle_init_command(color_frame, depth_frame, msg)
-                    self.socket.send_json(response)
-
+                    response = self.handle_init_command(parts)
                 elif cmd == "update":
-                    # 解码彩色和深度帧
-                    color_frame = self.decode_frame(color_frame_buf, dtype=np.uint8 if len(color_frame_buf) < 1000000 else np.uint8)
-                    depth_frame = self.decode_frame(depth_frame_buf, dtype=np.uint16)
-                    
-                    if color_frame is None or depth_frame is None:
-                        logger.error("帧解码失败")
-                        self.socket.send_json({"status": "error", "msg": "failed to decode frames"})
-                        continue
-                        
-                    response = self.handle_update_command(color_frame, depth_frame, msg)
-                    self.socket.send_json(response)
-
+                    response = self.handle_update_command(parts)
                 elif cmd == "release":
-                    response = self.handle_release_command(msg)
-                    self.socket.send_json(response)
+                    response = self.handle_release_command(meta_json)
+                
+                self.socket.send_json(response)
 
-                else:
-                    logger.warning(f"未知命令: {cmd}")
-                    self.socket.send_json({"status": "error", "msg": "unknown command"})
         except Exception as e:
-            logger.error(f"服务器运行时发生异常: {e}")
+            logger.error(f"Server loop error: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            # 清理所有会话
             with self.sessions_lock:
-                for session_id, session_thread in self.sessions.items():
-                    session_thread.stop()
-                    session_thread.join()
-                self.sessions.clear()
-                logger.info("服务器已关闭，所有会话已清理")
-
+                for s in self.sessions.values():
+                    s.stop()
 
 if __name__ == "__main__":
-    # 可以通过命令行参数控制是否启用调试可视化
-    # import argparse
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--debug", action="store_true", help="启用调试可视化")
-    # args = parser.parse_args()
-    
-    # server = TrackerServer(vis=args.debug)
-    server = TrackerServer(vis=False)
-    # server = TrackerServer(vis=True)
+    # 确保 config.py 和 weights 路径正确
+    server = TrackerServer(vis=True) # vis=True 会在服务器端 debug 目录保存图片
     server.run()
