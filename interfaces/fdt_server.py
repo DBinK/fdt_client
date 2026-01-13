@@ -19,11 +19,13 @@ logger.add(sys.stderr, level="INFO")  # 添加新的处理器，级别为DEBUG
 # logger.add(sys.stderr, level="DEBUG")  # 添加新的处理器，级别为DEBUG
 
 class SessionThread(threading.Thread):
-    def __init__(self, session_id, frame, bbox, vis=False):
+    def __init__(self, session_id, color_frame, depth_frame, object_name, cam_K, vis=False):
         super().__init__()
         self.session_id = session_id
-        self.frame = frame
-        self.bbox = bbox
+        self.color_frame = color_frame
+        self.depth_frame = depth_frame
+        self.object_name = object_name
+        self.cam_K = cam_K
         self.vis = vis
         self.tracker = None
         self.initialized = False
@@ -36,7 +38,8 @@ class SessionThread(threading.Thread):
         try:
             # 初始化跟踪器
             self.tracker = TrackerDiMP_create()
-            self.tracker.init(self.frame, tuple(self.bbox))
+            # 使用彩色帧和深度帧初始化跟踪器（具体初始化参数可能需要根据ob_wrapper中的实现调整）
+            self.tracker.init(self.color_frame, self.depth_frame, self.object_name, self.cam_K)
             self.initialized = True
             
             # 通知主线程初始化完成
@@ -52,34 +55,34 @@ class SessionThread(threading.Thread):
             self.result = {"status": "error", "msg": str(e)}
             self.result_available.set()
 
-    def update(self, frame):
+    def update(self, color_frame, depth_frame):
         if not self.initialized or self.tracker is None:
             return None
 
         try:
-            # 调用实际的追踪器更新方法
-            success, bbox = self.tracker.update(frame)
+            # 调用实际的追踪器更新方法，传入彩色和深度帧
+            success, bbox = self.tracker.update(color_frame, depth_frame)
 
             # 根据vis参数决定是否显示调试窗口
             if self.vis:
-                if frame is not None:
+                if color_frame is not None:
                     cv2.namedWindow(self.session_id, cv2.WINDOW_NORMAL)
 
                 if success and bbox is not None:
                     # 绘制边界框
                     x, y, w, h = [int(v) for v in bbox]
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.putText(frame, "DiMP", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
+                    cv2.rectangle(color_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.putText(color_frame, "DiMP", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
                     
                     if self.vis:
-                        cv2.imshow(self.session_id, frame)
+                        cv2.imshow(self.session_id, color_frame)
                         cv2.waitKey(1)
                     return bbox
                 
                 else:
                     if self.vis:
-                        cv2.putText(frame, "追踪失败", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-                        cv2.imshow(self.session_id, frame)
+                        cv2.putText(color_frame, "追踪失败", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
+                        cv2.imshow(self.session_id, color_frame)
                         cv2.waitKey(1)
                     return None
             else:
@@ -115,12 +118,17 @@ class TrackerServer:
         logger.info("服务端启动...")
         logger.info(f"监听地址: {self.address}")
 
-    def decode_frame(self, buf):
-        """解码JPEG为numpy图像"""
-        np_arr = np.frombuffer(buf, dtype=np.uint8)
-        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    def decode_frame(self, buf, dtype=np.uint8):
+        """解码JPEG/PNG为numpy图像或直接返回原始数据"""
+        if dtype == np.uint16:
+            # 对于uint16深度图，直接恢复原始数据
+            return np.frombuffer(buf, dtype=np.uint16).reshape((480, 640))  # 根据实际情况调整形状
+        else:
+            # 对于普通彩色图像，使用JPEG解码
+            np_arr = np.frombuffer(buf, dtype=dtype)
+            return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    def init_tracker(self, session_id, frame, bbox):
+    def init_tracker(self, session_id, color_frame, depth_frame, object_name, cam_K):
         """
         初始化追踪器线程
         """
@@ -131,17 +139,17 @@ class TrackerServer:
                 self.sessions[session_id].join()
                 
             # 创建并启动新的会话线程
-            session_thread = SessionThread(session_id, frame, bbox, self.vis)
+            session_thread = SessionThread(session_id, color_frame, depth_frame, object_name, cam_K, self.vis)
             session_thread.start()
             self.sessions[session_id] = session_thread
 
-            logger.info(f"开始新任务: {bbox}, {session_id}")
+            logger.info(f"开始新任务: {object_name}, {session_id}")
             
             # 等待初始化结果
             session_thread.result_available.wait()
             return session_thread.result
 
-    def update_tracker(self, session_id, frame):
+    def update_tracker(self, session_id, color_frame, depth_frame):
         """
         更新追踪器
         """
@@ -154,7 +162,7 @@ class TrackerServer:
         if not session_thread.initialized:
             return None
             
-        return session_thread.update(frame)
+        return session_thread.update(color_frame, depth_frame)
 
     def release_tracker(self, session_id):
         """
@@ -168,26 +176,29 @@ class TrackerServer:
                 return True
         return False
 
-    def handle_init_command(self, frame, msg):
-        if frame is None:
-            return {"status": "error", "msg": "failed to decode frame"}
+    def handle_init_command(self, color_frame, depth_frame, msg):
+        if color_frame is None or depth_frame is None:
+            return {"status": "error", "msg": "failed to decode frames"}
         
         session_id = msg.get("session_id")
         if not session_id:
             return {"status": "error", "msg": "session_id is required"}
         
-        result = self.init_tracker(session_id, frame, msg["bbox"])
+        object_name = msg.get("object_name", "")
+        cam_K = msg.get("cam_K", [])
+        
+        result = self.init_tracker(session_id, color_frame, depth_frame, object_name, cam_K)
         return result
 
-    def handle_update_command(self, frame, msg):
-        if frame is None:
-            return {"status": "error", "msg": "failed to decode frame"}
+    def handle_update_command(self, color_frame, depth_frame, msg):
+        if color_frame is None or depth_frame is None:
+            return {"status": "error", "msg": "failed to decode frames"}
         
         session_id = msg.get("session_id")
         if not session_id:
             return {"status": "error", "msg": "session_id is required"}
             
-        bbox = self.update_tracker(session_id, frame)
+        bbox = self.update_tracker(session_id, color_frame, depth_frame)
         if bbox is not None:
             return {"status": "ok", "bbox": bbox}
         else:
@@ -207,17 +218,17 @@ class TrackerServer:
     def run(self):
         try:
             while True:
-                # multipart 接收: [json字符串, 图像二进制]
+                # multipart 接收: [json字符串, 彩色帧二进制, 深度帧二进制]
                 parts = self.socket.recv_multipart()
                 
-                # 检查接收到的部分数量
-                if len(parts) != 2:
-                    logger.error(f"接收到错误的消息部分数量: {len(parts)}, 期望: 2")
+                # 检查接收到的部分数量 - 新协议应有3部分：JSON元数据，彩色帧，深度帧
+                if len(parts) != 3:
+                    logger.error(f"接收到错误的消息部分数量: {len(parts)}, 期望: 3")
                     self.socket.send_json({"status": "error", "msg": "invalid message format"})
                     continue
                     
-                meta_str, frame_buf = parts
-                logger.debug(f"接收到消息，元数据长度: {len(meta_str)}, 帧数据长度: {len(frame_buf)}")
+                meta_str, color_frame_buf, depth_frame_buf = parts
+                logger.debug(f"接收到消息，元数据长度: {len(meta_str)}, 彩色帧数据长度: {len(color_frame_buf)}, 深度帧数据长度: {len(depth_frame_buf)}")
                 
                 try:
                     msg = json.loads(meta_str.decode("utf-8"))
@@ -230,23 +241,30 @@ class TrackerServer:
                 logger.debug(f"收到命令: {cmd}")
 
                 if cmd == "init":
-                    frame = self.decode_frame(frame_buf)
-                    if frame is None:
+                    # 解码彩色和深度帧
+                    color_frame = self.decode_frame(color_frame_buf, dtype=np.uint8 if len(color_frame_buf) < 1000000 else np.uint8)
+                    # 确定深度帧的数据类型并解码
+                    depth_frame = self.decode_frame(depth_frame_buf, dtype=np.uint16)
+                    
+                    if color_frame is None or depth_frame is None:
                         logger.error("帧解码失败")
-                        self.socket.send_json({"status": "error", "msg": "failed to decode frame"})
+                        self.socket.send_json({"status": "error", "msg": "failed to decode frames"})
                         continue
                         
-                    response = self.handle_init_command(frame, msg)
+                    response = self.handle_init_command(color_frame, depth_frame, msg)
                     self.socket.send_json(response)
 
                 elif cmd == "update":
-                    frame = self.decode_frame(frame_buf)
-                    if frame is None:
+                    # 解码彩色和深度帧
+                    color_frame = self.decode_frame(color_frame_buf, dtype=np.uint8 if len(color_frame_buf) < 1000000 else np.uint8)
+                    depth_frame = self.decode_frame(depth_frame_buf, dtype=np.uint16)
+                    
+                    if color_frame is None or depth_frame is None:
                         logger.error("帧解码失败")
-                        self.socket.send_json({"status": "error", "msg": "failed to decode frame"})
+                        self.socket.send_json({"status": "error", "msg": "failed to decode frames"})
                         continue
                         
-                    response = self.handle_update_command(frame, msg)
+                    response = self.handle_update_command(color_frame, depth_frame, msg)
                     self.socket.send_json(response)
 
                 elif cmd == "release":
