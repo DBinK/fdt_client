@@ -1,5 +1,7 @@
 # pytracking_client.py
 import json
+import os
+from pathlib import Path
 import uuid
 import sys
 
@@ -26,6 +28,9 @@ class RemoteFoundationPose:
         logger.info(f"连接到 {address}")
         logger.info(f"任务 Session ID: {self.session_id}")
 
+        self.init_pose = []
+        self.bbox_corners = []
+
     def _encode_frame(self, frame: np.ndarray):
         """编码图像为JPEG（二进制）或根据数据类型选择适当编码"""
         if frame.dtype == np.uint16:    
@@ -36,21 +41,51 @@ class RemoteFoundationPose:
             _, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             return buf.tobytes()  # 对于普通彩色图像，使用JPEG
 
-    def init(self, color_frame: np.ndarray, depth_frame: np.ndarray, object_name: str, cam_K: np.ndarray):
-        logger.info(f"{color_frame.shape:}, {object_name:}, {cam_K:}")
+    def _encode_file(self, file_path:Path | str):
+        """编码文件为二进制数据"""
+        file_path = Path(file_path)
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                return f.read()
+        else:
+            logger.warning(f"文件不存在: {file_path}")
+            return b""
 
-        meta = {"cmd": "init", "object_name": object_name, "cam_K": cam_K, "session_id": self.session_id}
+    def init(
+        self,
+        text_prompt: str,
+        cam_K: np.ndarray,
+        mesh_file: Path | str,
+        color_frame: np.ndarray,
+        depth_frame: np.ndarray,
+    ):
+        logger.info(f"{color_frame.shape:}, {text_prompt:}, {cam_K:}")
+
+        meta = {
+            "cmd": "init",
+            "session_id": self.session_id,
+            "text_prompt": text_prompt,
+            "cam_K": cam_K,
+        }
         color_frame_bytes = self._encode_frame(color_frame)
         depth_frame_bytes = self._encode_frame(depth_frame)
+        mesh_file_bytes = self._encode_file(mesh_file)
 
         # multipart: [json, binary]
-        self.zmq_socket.send_multipart([json.dumps(meta).encode("utf-8"), color_frame_bytes, depth_frame_bytes])
+        self.zmq_socket.send_multipart([
+                json.dumps(meta).encode("utf-8"), 
+                mesh_file_bytes,
+                color_frame_bytes, 
+                depth_frame_bytes,
+            ])
         reply = self.zmq_socket.recv_json()  # 接收回复
 
         # 确保reply是字典类型
         if isinstance(reply, dict) and reply.get("status") == "ok":
             self.initialized = True
             logger.success(f"tracker 初始化成功: {reply}")
+            self.init_pose = reply.get("pose")  # 在客户端其实没什么用
+            self.bbox_corners = reply.get("bbox")
             return True
         else:
             logger.error(f"tracker 初始化失败: {reply}")
@@ -68,20 +103,20 @@ class RemoteFoundationPose:
         self.zmq_socket.send_multipart([json.dumps(meta).encode("utf-8"), color_frame_bytes, depth_frame_bytes])
         reply = self.zmq_socket.recv_json()  # 接收回复
         
-        return reply
+        # return reply
 
         # TODO: 等待确定返回值
         # # 确保reply是字典类型
-        # if isinstance(reply, dict) and reply.get("status") == "ok":
-        #     bbox = reply.get("bbox")  # 确保bbox可以转换为tuple类型
-        #     if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-        #         logger.debug(f"任务 {self.session_id} 更新的 bbox {bbox}")
-        #         return True, tuple(bbox)  
-        #     else:              
-        #         logger.error(f"任务 {self.session_id} bbox 格式错误: {bbox}")
-        #         return False, None   # 如果bbox不是期望的格式，则返回错误
-        # else:
-        #     return False, None
+        if isinstance(reply, dict) and reply.get("status") == "ok":
+            pose = reply.get("pose")   # 确保bbox可以转换为tuple类型
+            if isinstance(pose, (list, tuple)) and len(pose) == 16:
+                logger.debug(f"任务 {self.session_id} 更新的 pose {pose}")
+                return True, tuple(pose)  
+            else:              
+                logger.error(f"任务 {self.session_id} pose 格式错误: {pose}")
+                return False, None   # 如果bbox不是期望的格式，则返回错误
+        else:
+            return False, None
 
     def release(self):
         """
@@ -100,10 +135,12 @@ class RemoteFoundationPose:
             return False    
 
 
+# 测试用例
 if __name__ == "__main__":
     
     from rich import print as rprint
     from rgbd_cam import OrbbecRGBDCamera
+
 
     tracker = RemoteFoundationPose()
     tracker.release()
@@ -119,13 +156,11 @@ if __name__ == "__main__":
         # 启动采集
         gemini_2.start()
 
+        text_prompt = "mango"
         intrinsic = gemini_2.get_intrinsic()
-        distortion = gemini_2.get_depth_distortion()
+        mesh_file = "tmp/scaled_mesh.obj"
 
         rprint(intrinsic)
-        rprint(distortion)
-
-        breakpoint()
         
         print("开始采集彩色和深度图像，按 'q' 或 ESC 键退出")
         
@@ -146,7 +181,13 @@ if __name__ == "__main__":
             cv2.imshow("Depth Image", depth_image)
 
             if not tracker.initialized and intrinsic is not None:
-                tracker.init(color_image, depth_image, "mango", intrinsic)
+                tracker.init(
+                    text_prompt=text_prompt,
+                    cam_K=intrinsic,
+                    mesh_file=mesh_file,
+                    color_frame=color_image,
+                    depth_frame=depth_image,
+                )
 
             reply = tracker.update(color_image, depth_image)
 
