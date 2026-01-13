@@ -1,0 +1,16 @@
+[project]
+name = "orbbec-wrapper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "loguru>=0.7.3",
+    "looptick>=0.1.4",
+    "pyorbbecsdk",
+    "pyzmq>=27.1.0",
+    "rich>=14.2.0",
+]
+
+[tool.uv.sources]
+pyorbbecsdk = { path = "lib/pyorbbecsdk-1.3.4-cp310-cp310-linux_x86_64.whl" }
