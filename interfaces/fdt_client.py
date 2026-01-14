@@ -61,11 +61,15 @@ class RemoteFoundationPose:
     ):
         logger.info(f"{color_frame.shape:}, {text_prompt:}, {cam_K:}")
 
+        h, w = depth_frame.shape[:2]
+
         meta = {
             "cmd": "init",
             "session_id": self.session_id,
+            "width": w,   # 图像宽高, 服务端解析图片时需要
+            "height": h,   
             "text_prompt": text_prompt,
-            "cam_K": cam_K,
+            "cam_K": cam_K.tolist(),
         }
         color_frame_bytes = self._encode_frame(color_frame)
         depth_frame_bytes = self._encode_frame(depth_frame)
@@ -94,8 +98,15 @@ class RemoteFoundationPose:
     def update(self, color_frame: np.ndarray, depth_frame: np.ndarray):
         if not self.initialized:
             raise RuntimeError("Tracker not initialized. Call init() first.")
+        
+        h, w = depth_frame.shape[:2]
 
-        meta = {"cmd": "update", "session_id": self.session_id}
+        meta = {
+            "cmd": "update",
+            "session_id": self.session_id,
+            "width": w,  # 图像宽高, 服务端解析图片时需要
+            "height": h,
+        }
 
         color_frame_bytes = self._encode_frame(color_frame)
         depth_frame_bytes = self._encode_frame(depth_frame)
@@ -142,7 +153,7 @@ if __name__ == "__main__":
     from rgbd_cam import OrbbecRGBDCamera
 
 
-    tracker = RemoteFoundationPose()
+    tracker = RemoteFoundationPose("tcp://127.0.0.1:5555")
     tracker.release()
 
     # 创建采集器实例
@@ -156,13 +167,14 @@ if __name__ == "__main__":
         # 启动采集
         gemini_2.start()
 
-        text_prompt = "mango"
+        text_prompt = "yellow"
         intrinsic = gemini_2.get_intrinsic()
         mesh_file = "tmp/scaled_mesh.obj"
 
         rprint(intrinsic)
         
         print("开始采集彩色和深度图像，按 'q' 或 ESC 键退出")
+        is_init = False
         
         while True:
             # 获取图像帧
@@ -170,18 +182,16 @@ if __name__ == "__main__":
             ns = loop.tick()
             hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
 
-            # 显示彩色图像
             if color_image is None or depth_image is None:
                 continue
 
-            cv2.imshow("Color Image", color_image)
-                
-            # 显示深度图像
             depth_image = cv2.bitwise_not(depth_image)
-            cv2.imshow("Depth Image", depth_image)
+            # 显示彩色图像 和 深度图像
+            # cv2.imshow("Color Image", color_image)
+            # cv2.imshow("Depth Image", depth_image)
 
             if not tracker.initialized and intrinsic is not None:
-                tracker.init(
+                is_init = tracker.init(
                     text_prompt=text_prompt,
                     cam_K=intrinsic,
                     mesh_file=mesh_file,
@@ -189,7 +199,11 @@ if __name__ == "__main__":
                     depth_frame=depth_image,
                 )
 
-            reply = tracker.update(color_image, depth_image)
+            breakpoint()
+            
+            if is_init:
+                reply = tracker.update(color_image, depth_image)
+                rprint(reply)
 
             # 处理键盘输入
             key = cv2.waitKey(1) & 0xFF

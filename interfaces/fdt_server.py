@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import cv2
 import zmq
 import numpy as np
-from loguru import logger
+from logger import logger
+from rich import print as rprint
 
 # === 引入新的 Tracker ===
 from tracker import FoundationPoseGDSAMTracker
@@ -64,11 +65,15 @@ class SessionThread(threading.Thread):
                 debug_dir=str(self.debug_dir),
                 device="cuda"
             )
+            logger.info(f"会话 {self.session_id} 追踪器初始化完成，开始第一帧注册...")
             
             # 执行第一帧注册
             success, pose = self.tracker.init(self.color_frame, self.depth_frame)
+            logger.info(f"会话 {self.session_id} 第一帧注册完成，结果: {success}")
+            
             
             if success:
+                rprint(pose)  # 打印 Pose
                 # 获取 BBox (8个顶点) 供客户端画图
                 bbox_corners = self.tracker.get_bbox_corners()
                 
@@ -139,32 +144,45 @@ class TrackerServer:
         logger.info("服务端启动...")
         logger.info(f"监听地址: {self.address}")
 
-    def decode_frame(self, buf, dtype=np.uint8):
-        """解码图像"""
+    def decode_frame(self, buf, dtype=np.uint8, shape=None):
+        """
+        :param shape: tuple (height, width)，用于 raw bytes 重塑
+        """
         if buf is None or len(buf) == 0:
             return None
+            
         if dtype == np.uint16:
-            # 深度图：假设是 raw bytes (width * height * 2) 或者 png
-            # 客户端代码 send_multipart 发送的是 frame.tobytes() (raw)
-            # 所以这里直接 frombuffer 并 reshape
-            # TODO: 这是一个硬编码的风险点，需要知道分辨率。
-            # 建议：客户端在 JSON 中带上 width/height，或者统一用 png 编码深度图
+            # 1. 优先尝试 PNG 解码 (兼容性)
             try:
-                # 尝试作为图像解码 (PNG)
                 arr = np.frombuffer(buf, dtype=np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
                 if img is not None:
+                    # 将uint16图像转换为float32以避免PyTorch错误
+                    if img.dtype == np.uint16:
+                        img = img.astype(np.float32)
                     return img
             except:
                 pass
             
-            # 回退到 Raw buffer (假设 640x480) - 这是一个潜在的Bug源
-            # 如果客户端改用 tobytes()，必须保证分辨率一致
-            # 根据 fdt_client.py: return frame.tobytes() -> 这是 raw bytes
-            # 我们需要知道分辨率。这里暂时假设 640x480
-            return np.frombuffer(buf, dtype=np.uint16).reshape((480, 640))
+            # 2. 回退到 Raw Bytes 解析
+            # 如果提供了 shape，则使用 shape；否则报错或使用默认值
+            raw_data = np.frombuffer(buf, dtype=np.uint16)
+            
+            if shape is not None:
+                h, w = shape
+                # 安全检查：确保字节数匹配
+                if raw_data.size != h * w:
+                    logger.error(f"Raw data size {raw_data.size} does not match shape {shape} ({h*w})")
+                    return None
+                # 将uint16转换为float32以避免PyTorch错误
+                return raw_data.reshape((h, w)).astype(np.float32)
+            else:
+                # 只有在万不得已时才硬编码
+                logger.warning("Warning: Decoding raw depth without shape! Assuming 480x640.")
+                return raw_data.reshape((1280, 720))  # 一般都是这个分辨率
+                
         else:
-            # 彩色图：jpg 解码
+            # 彩色图 (JPG) 自带分辨率，无需 shape
             np_arr = np.frombuffer(buf, dtype=dtype)
             return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -185,19 +203,23 @@ class TrackerServer:
         meta_str, mesh_buf, color_buf, depth_buf = parts
         try:
             msg = json.loads(meta_str.decode("utf-8"))
-        except:
-            return {"status": "error", "msg": "invalid json"}
+        except Exception as e:
+            return {"status": "error", "msg": "invalid json " + str(e)}
 
         session_id = msg.get("session_id")
         text_prompt = msg.get("text_prompt")
         cam_K_list = msg.get("cam_K")
+        # 从 JSON 获取分辨率
+        width = msg.get("width", 1280)  # 提供默认值以防老客户端连接
+        height = msg.get("height", 720)
+        target_shape = (height, width) # 注意 numpy 是 (h, w)
 
         if not all([session_id, text_prompt, cam_K_list]):
             return {"status": "error", "msg": "Missing required fields"}
 
         # 解码图像
         color_frame = self.decode_frame(color_buf, np.uint8)
-        depth_frame = self.decode_frame(depth_buf, np.uint16)
+        depth_frame = self.decode_frame(depth_buf, np.uint16, shape=target_shape)
         
         if color_frame is None or depth_frame is None:
             return {"status": "error", "msg": "Frame decode failed"}
@@ -226,7 +248,7 @@ class TrackerServer:
             session_thread.result_available.wait()
             return session_thread.result
 
-    def handle_update_command(self, parts):
+    def handle_update_command(self, parts): 
         """处理 Update: [json, color_bytes, depth_bytes]"""
         if len(parts) != 3:
             return {"status": "error", "msg": "Update requires 3 parts"}
@@ -234,8 +256,8 @@ class TrackerServer:
         meta_str, color_buf, depth_buf = parts
         try:
             msg = json.loads(meta_str.decode("utf-8"))
-        except:
-            return {"status": "error", "msg": "invalid json"}
+        except Exception as e:
+            return {"status": "error", "msg": "invalid json" + str(e)}
             
         session_id = msg.get("session_id")
         
@@ -247,9 +269,14 @@ class TrackerServer:
         if not session_thread.initialized:
             return {"status": "error", "msg": "Tracker not initialized"}
 
+        # 从 JSON 获取分辨率
+        width = msg.get("width", 1280)  # 提供默认值以防老客户端连接
+        height = msg.get("height", 720)
+        target_shape = (height, width) # 注意 numpy 是 (h, w)
+
         # 解码图像
         color_frame = self.decode_frame(color_buf, np.uint8)
-        depth_frame = self.decode_frame(depth_buf, np.uint16)
+        depth_frame = self.decode_frame(depth_buf, np.uint16, shape=target_shape) # 修正：添加shape参数
 
         pose_list = session_thread.update(color_frame, depth_frame)
         
