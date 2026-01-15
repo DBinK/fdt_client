@@ -216,7 +216,6 @@ if __name__ == "__main__":
                     color_image = draw_3d_box_client(color_image, pose, intrinsic, bbox)
                     cv2.imshow("Color Image", color_image)
 
-
             # 处理键盘输入
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:  # 'q' 或 ESC 键退出
