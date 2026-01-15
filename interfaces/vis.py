@@ -11,10 +11,26 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
     """
     img_draw = image.copy()
     
+    # 确保 pose 是 4x4 矩阵
+    if isinstance(pose, (list, tuple)):
+        pose = np.array(pose).reshape(4, 4)
+    elif isinstance(pose, np.ndarray) and pose.size == 16:
+        pose = pose.reshape(4, 4)
+    
+    # 确保 K 是 3x3 矩阵
+    if isinstance(K, (list, tuple)):
+        K = np.array(K).reshape(3, 3)
+    elif isinstance(K, np.ndarray) and K.size == 9:
+        K = K.reshape(3, 3)
+    
+    # 确保 bbox_3d_local 是 numpy 数组
+    if not isinstance(bbox_3d_local, np.ndarray):
+        bbox_3d_local = np.array(bbox_3d_local)
+
     # 1. 将局部坐标转换到相机坐标: P_cam = Pose * P_local
-    # bbox_3d_local 是 (8, 3)，变成齐次坐标 (8, 4)
     ones = np.ones((bbox_3d_local.shape[0], 1))
     points_homo = np.hstack([bbox_3d_local, ones]) # (8, 4)
+    
     
     # 矩阵乘法: (Pose @ points.T).T -> (8, 4)
     points_cam = (pose @ points_homo.T).T 
@@ -37,9 +53,9 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
     # 假设 bbox 顺序是 trimesh.bounds.corners 的标准顺序
     # 也可以简单粗暴地根据距离画，这里给出一个通用的连接表
     lines = [
-        (0, 1), (1, 3), (3, 2), (2, 0), # 底面
-        (4, 5), (5, 7), (7, 6), (6, 4), # 顶面
-        (0, 4), (1, 5), (2, 6), (3, 7)  # 中间柱子
+        (0, 1), (1, 2), (2, 3), (3, 0), # 底面
+        (4, 5), (5, 6), (6, 7), (7, 4), # 顶面
+        (0, 4), (1, 5), (2, 6), (3, 7)  # 垂直连接
     ]
     
     for i, j in lines:
@@ -48,11 +64,58 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
         # 简单裁剪，避免画在屏幕外报错
         cv2.line(img_draw, pt1, pt2, (0, 255, 0), 2, cv2.LINE_AA)
         
-    # 画个坐标轴中心看看位置对不对
-    center_cam = pose[:3, 3]
-    center_uv = (K @ center_cam)
-    if center_uv[2] > 0:
+    # 计算并绘制立方体中心点
+    # 立方体中心 = 所有顶点的平均值
+    cube_center_3d = np.mean(bbox_3d_local, axis=0)  # (3,) - 局部坐标系中的中心点
+    
+    # 将立方体中心转换到相机坐标系
+    ones = np.array([*cube_center_3d, 1])  # 齐次坐标
+    cube_center_cam = (pose @ ones)[:3]  # 相机坐标系中的中心点
+    
+    # 将立方体中心投影到图像平面
+    if cube_center_cam[2] > 0:  # 确保点在相机前方
+        # 绘制中心点
+        center_uv = K @ cube_center_cam
         cx, cy = int(center_uv[0]/center_uv[2]), int(center_uv[1]/center_uv[2])
-        cv2.circle(img_draw, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.circle(img_draw, (cx, cy), 6, (255, 0, 0), -1)  # 使用蓝色圆圈标记立方体中心
+        
+        # 绘制坐标轴（从物体原点开始）
+        axis_length = 0.1  # 坐标轴长度
+        
+        # 物体原点在相机坐标系中的位置（这是pose的平移部分）
+        origin_cam = pose[:3, 3]
+        
+        # 使用旋转矩阵的列向量来定义各轴方向
+        rotation_matrix = pose[:3, :3]
+        
+        # X轴（红色）在相机坐标系中的终点
+        x_end_cam = origin_cam + rotation_matrix[:3, 0] * axis_length
+        # Y轴（绿色）在相机坐标系中的终点
+        y_end_cam = origin_cam + rotation_matrix[:3, 1] * axis_length
+        # Z轴（蓝色）在相机坐标系中的终点
+        z_end_cam = origin_cam + rotation_matrix[:3, 2] * axis_length
+        
+        # 投影到图像平面
+        def project_point(point_cam):
+            if point_cam[2] > 0:
+                point_uv = K @ point_cam
+                u, v = int(point_uv[0]/point_uv[2]), int(point_uv[1]/point_uv[2])
+                return (u, v)
+            return None
+        
+        # 投影原点和各轴端点
+        origin_proj = project_point(origin_cam)
+        x_proj = project_point(x_end_cam)
+        y_proj = project_point(y_end_cam)
+        z_proj = project_point(z_end_cam)
+        
+        # 绘制坐标轴
+        if origin_proj and x_proj:
+            cv2.line(img_draw, origin_proj, x_proj, (0, 0, 255), 3)  # X轴 - 红色
+        if origin_proj and y_proj:
+            cv2.line(img_draw, origin_proj, y_proj, (0, 255, 0), 3)  # Y轴 - 绿色
+        if origin_proj and z_proj:
+            cv2.line(img_draw, origin_proj, z_proj, (255, 0, 0), 3)  # Z轴 - 蓝色
+
 
     return img_draw
