@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import uuid
-import sys
 
 from looptick import LoopTick
 import numpy as np
@@ -12,11 +11,6 @@ import cv2
 
 from fdt_client.vis import draw_3d_box_client
 from fdt_client.logger import logger   # 设置日志级别为DEBUG，这样就能看到debug信息了
-
-
-logger.remove()  # 移除默认的处理器
-logger.add(sys.stderr, level="INFO")  # 添加新的处理器，级别为DEBUG
-# logger.add(sys.stderr, level="DEBUG")  # 添加新的处理器，级别为DEBUG
 
 
 class RemoteFoundationPose:
@@ -61,7 +55,7 @@ class RemoteFoundationPose:
         color_frame: np.ndarray,
         depth_frame: np.ndarray,
     ):
-        logger.info(f"{color_frame.shape:}, {text_prompt:}, {cam_K:}")
+        logger.info(f"{color_frame.shape:}, {text_prompt:}, 开始初始化 Foundation Pose Tracker")
 
         h, w = depth_frame.shape[:2]
 

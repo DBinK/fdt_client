@@ -78,7 +78,7 @@ def track_pose(
             # 打印信息
             ns = loop.tick()
             hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
-            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_arm}", end='', flush=True)
+            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_arm}" + ""*10, end='', flush=True)
 
             # 可视化 (可选)
             if ret and vis:  
