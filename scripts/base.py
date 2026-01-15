@@ -62,15 +62,14 @@ def track_pose(
             
             # 更新追踪, 核心代码
             ret, pose_cam = tracker.update(color_image, depth_image)
+            pose_cam = np.array(pose_cam).reshape(4, 4)  # 确保为 4x4 矩阵
 
             # 对 pose 结果做其他的后处理
             xyz_arm = []
             xyz_cam  = []
             if ret:
                 pose_base = cam2base(pose_cam, T_cam_to_base)
-
-                pose_cam = np.array(pose_cam).reshape(4, 4)
-                pose_base = np.array(pose_base).reshape(4, 4)
+                pose_base = np.array(pose_base).reshape(4, 4)  # 确保为 4x4 矩阵
 
                 xyz_arm = pose_base[:3, 3]
                 xyz_cam = pose_cam[:3, 3]
@@ -151,14 +150,20 @@ def cam2base(pose_cam, T_cam_to_base):
 
 if __name__ == "__main__":
 
-    text_prompt = "yellow"
-    mesh_file = "tmp/scaled_mesh.obj"
+    # 要检测的物体
+    text_prompt = "yellow"    # 物体提示词
+    mesh_file = "tmp/scaled_mesh.obj"   # 模型文件路径
 
-    device_index = 1
-    server_url = "tcp://127.0.0.1:5555"
-    vis = True
+    # 运行参数
+    device_index = 1          # 相机索引
+    server_url = "tcp://127.0.0.1:5555"   # 如果不在本机推理, 切换成其他局域网地址
+    # server_url = "tcp:// 192.168.1.124:5555"  
+
+    # 是否可视化
+    vis = True   
     # vis = False
 
+    # 相机外参 (相机在机械臂基座坐标系中的位姿)
     MAIN_MAT = [
         [-0.99857, 0.05338, 0.00201, 544.02],
         [0.03946, 0.76244, -0.64586, 552.76],
@@ -168,10 +173,8 @@ if __name__ == "__main__":
     MAIN_MAT = np.array(MAIN_MAT)
 
     MAIN_MAT_converted = MAIN_MAT.copy()
-    MAIN_MAT_converted[:3, 3] /= 1000.0  # 只转换平移部分（最后列的前三个元素）
+    MAIN_MAT_converted[:3, 3] /= 1000.0  # 单位转米
 
+    # 执行推理
     track_pose(text_prompt, mesh_file, device_index, server_url, MAIN_MAT_converted, vis)
 
-    """
-    python src/fdt_client/main.py --text-prompt yellow --mesh-file tmp/scaled_mesh.obj
-    """
