@@ -201,7 +201,7 @@ wheels = [
 [[package]]
 name = "fdt-client"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "loguru" },
     { name = "looptick" },

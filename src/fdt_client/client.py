@@ -10,8 +10,8 @@ import numpy as np
 import zmq
 import cv2
 
-from vis import draw_3d_box_client
-from loguru import logger   # 设置日志级别为DEBUG，这样就能看到debug信息了
+from fdt_client.vis import draw_3d_box_client
+from fdt_client.logger import logger   # 设置日志级别为DEBUG，这样就能看到debug信息了
 
 
 logger.remove()  # 移除默认的处理器
