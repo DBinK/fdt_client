@@ -10,7 +10,7 @@ from rich import print as rprint
 from fdt_client.logger import logger
 from fdt_client.rgbd_cam import OrbbecRGBDCamera
 from fdt_client.client import RemoteFoundationPose
-from fdt_client.vis import draw_3d_box_client
+from fdt_client.vis import draw_3d_box_client, draw_dict_to_img
 
 
 loop = LoopTick()
@@ -77,10 +77,23 @@ def track_pose(
                 xyz_base = pose_base[:3, 3]
                 xyz_cam = pose_cam[:3, 3]
 
+            # 打印信息
+            ns = loop.tick()
+            hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
+            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_base}", end='', flush=True)
+
             # 可视化 (可选)
             if ret and vis:  
                 # 绘制 3D 边界框
-                vis_image = draw_3d_box_client(color_image, pose_cam, intrinsic, tracker.bbox_corners)
+                result = {
+                    "Hz": f"{hz:.2f}",
+                    "xyz_cam": xyz_cam, 
+                    "xyz_base": xyz_base,
+                }
+                vis_image = color_image
+                vis_image = draw_dict_to_img(color_image, result, font_size=1)
+                vis_image = draw_3d_box_client(vis_image, pose_cam, intrinsic, tracker.bbox_corners)
+                
                 cv2.imshow("vis_image", vis_image)
 
                 # 显示原始彩色图像 和 深度图像
@@ -92,10 +105,6 @@ def track_pose(
                 if key == ord('q') or key == 27:  # 'q' 或 ESC 键退出
                     break
             
-            # 打印信息
-            ns = loop.tick()
-            hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
-            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_base}", end='', flush=True)
 
     except Exception as e:
         logger.exception(f"程序运行出错: {e}")

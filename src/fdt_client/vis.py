@@ -117,3 +117,39 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
             cv2.putText(img_draw, 'Z', z_proj, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
     return img_draw
+
+def draw_dict_to_img(img, draw_dict, font_size):
+    """
+    在图像上绘制字典的键和值
+    :param img: 输入图像
+    :param draw_dict: 要绘制的字典
+    :param font_size: 字体大小
+    """
+    img_draw = img.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    color = (0, 255, 0)  # 绿色字体
+    thickness = 2
+    
+    # 设置初始绘制位置（从图像左上角开始）
+    start_y = 30
+    offset_x = 20
+    line_height = int(30 * font_size)  # 根据字体大小调整行高
+    
+    for i, (key, value) in enumerate(draw_dict.items()):
+        # 格式化要显示的文本
+        text = f"{key}: {value}"
+        
+        # 计算文本尺寸，以便正确放置
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_size, thickness)
+        
+        # 计算当前行的y坐标
+        y_pos = start_y + i * line_height
+        
+        # 确保文本不会超出图像边界
+        if y_pos + text_height > img_draw.shape[0]:
+            break  # 如果超出图像底部，则停止绘制
+        
+        # 在图像上绘制文本
+        cv2.putText(img_draw, text, (offset_x, y_pos), font, font_size, color, thickness)
+    
+    return img_draw
