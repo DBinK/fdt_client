@@ -17,6 +17,7 @@ from rich import print as rprint
 
 # === 引入新的 Tracker ===
 from tracker import FoundationPoseGDSAMTracker
+from reader import simple_process_image_pair
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
@@ -77,7 +78,7 @@ class SessionThread(threading.Thread):
                 # 获取 BBox (8个顶点) 供客户端画图
                 bbox_corners = self.tracker.get_bbox_corners()
                 
-                self.initialized = True
+                self.initialized = True 
                 self.result = {
                     "status": "ok",
                     "pose": pose.flatten().tolist(),     # 转换为列表 (16,)
@@ -139,12 +140,12 @@ class TrackerServer:
         # 存储多个会话线程，以会话ID为键
         self.sessions = {}
         self.sessions_lock = threading.Lock()
-        self.vis = vis
+        self.vis: np.bool = vis
         
         logger.info("服务端启动...")
         logger.info(f"监听地址: {self.address}")
 
-    def decode_frame(self, buf, dtype=np.uint8, shape=None):
+    def decode_frame(self, buf, dtype=np.uint16, shape=None):
         """
         :param shape: tuple (height, width)，用于 raw bytes 重塑
         """
@@ -153,15 +154,16 @@ class TrackerServer:
             
         if dtype == np.uint16:
             # 1. 优先尝试 PNG 解码 (兼容性)
-            try:
-                arr = np.frombuffer(buf, dtype=np.uint8)
+            try: 
+                arr = np.frombuffer(buf, dtype=np.uint16)
                 img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
                 if img is not None:
                     # 将uint16图像转换为float32以避免PyTorch错误
                     if img.dtype == np.uint16:
                         img = img.astype(np.float32)
                     return img
-            except:
+            except Exception as e:
+                logger.error(f"PNG解码失败: {e}")
                 pass
             
             # 2. 回退到 Raw Bytes 解析
@@ -175,7 +177,7 @@ class TrackerServer:
                     logger.error(f"Raw data size {raw_data.size} does not match shape {shape} ({h*w})")
                     return None
                 # 将uint16转换为float32以避免PyTorch错误
-                return raw_data.reshape((h, w)).astype(np.float32)
+                return (raw_data.reshape((h, w)).astype(np.float32))
             else:
                 # 只有在万不得已时才硬编码
                 logger.warning("Warning: Decoding raw depth without shape! Assuming 480x640.")
@@ -220,9 +222,13 @@ class TrackerServer:
         # 解码图像
         color_frame = self.decode_frame(color_buf, np.uint8)
         depth_frame = self.decode_frame(depth_buf, np.uint16, shape=target_shape)
-        
+
         if color_frame is None or depth_frame is None:
             return {"status": "error", "msg": "Frame decode failed"}
+        
+        color_frame, depth_frame = simple_process_image_pair(
+    color_frame, depth_frame, target_size=(width, height)
+        )
 
         # 保存 Mesh
         try:
@@ -277,6 +283,18 @@ class TrackerServer:
         # 解码图像
         color_frame = self.decode_frame(color_buf, np.uint8)
         depth_frame = self.decode_frame(depth_buf, np.uint16, shape=target_shape) # 修正：添加shape参数
+        
+        if color_frame is None or depth_frame is None:
+            return {"status": "error", "msg": "Frame decode failed"}
+        
+        color_frame, depth_frame = simple_process_image_pair(
+            color_frame, depth_frame, target_size=(width, height)
+        )
+
+        now = time.time()
+
+        cv2.imwrite(f"logs/vis/depth_{now}.png", depth_frame.astype(np.uint8))
+        cv2.imwrite(f"logs/vis/color_{now}.png", color_frame)
 
         pose_list = session_thread.update(color_frame, depth_frame)
         
@@ -333,5 +351,6 @@ class TrackerServer:
 
 if __name__ == "__main__":
     # 确保 config.py 和 weights 路径正确
-    server = TrackerServer(vis=True) # vis=True 会在服务器端 debug 目录保存图片
+    # server = TrackerServer(vis=True) # vis=True 会在服务器端 debug 目录保存图片
+    server = TrackerServer(vis=False) # vis=True 会在服务器端 debug 目录保存图片
     server.run()
