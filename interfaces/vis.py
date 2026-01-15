@@ -62,7 +62,7 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
         pt1 = tuple(uv[i])
         pt2 = tuple(uv[j])
         # 简单裁剪，避免画在屏幕外报错
-        cv2.line(img_draw, pt1, pt2, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.line(img_draw, pt1, pt2, (0, 255, 200), 1, cv2.LINE_AA)
         
     # 计算并绘制立方体中心点
     # 立方体中心 = 所有顶点的平均值
@@ -74,26 +74,22 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
     
     # 将立方体中心投影到图像平面
     if cube_center_cam[2] > 0:  # 确保点在相机前方
-        # 绘制中心点
         center_uv = K @ cube_center_cam
         cx, cy = int(center_uv[0]/center_uv[2]), int(center_uv[1]/center_uv[2])
         cv2.circle(img_draw, (cx, cy), 6, (255, 0, 0), -1)  # 使用蓝色圆圈标记立方体中心
         
-        # 绘制坐标轴（从物体原点开始）
+        # 绘制坐标轴（从立方体中心开始）
         axis_length = 0.1  # 坐标轴长度
         
-        # 物体原点在相机坐标系中的位置（这是pose的平移部分）
-        origin_cam = pose[:3, 3]
-        
-        # 使用旋转矩阵的列向量来定义各轴方向
+        # 使用旋转矩阵的列向量来定义各轴方向（从立方体中心出发）
         rotation_matrix = pose[:3, :3]
         
-        # X轴（红色）在相机坐标系中的终点
-        x_end_cam = origin_cam + rotation_matrix[:3, 0] * axis_length
-        # Y轴（绿色）在相机坐标系中的终点
-        y_end_cam = origin_cam + rotation_matrix[:3, 1] * axis_length
-        # Z轴（蓝色）在相机坐标系中的终点
-        z_end_cam = origin_cam + rotation_matrix[:3, 2] * axis_length
+        # X轴（红色）在相机坐标系中的终点（从立方体中心出发）
+        x_end_cam = cube_center_cam + rotation_matrix[:3, 0] * axis_length
+        # Y轴（绿色）在相机坐标系中的终点（从立方体中心出发）
+        y_end_cam = cube_center_cam + rotation_matrix[:3, 1] * axis_length
+        # Z轴（蓝色）在相机坐标系中的终点（从立方体中心出发）
+        z_end_cam = cube_center_cam + rotation_matrix[:3, 2] * axis_length
         
         # 投影到图像平面
         def project_point(point_cam):
@@ -103,19 +99,19 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
                 return (u, v)
             return None
         
-        # 投影原点和各轴端点
-        origin_proj = project_point(origin_cam)
+        # 投影立方体中心和各轴端点
+        center_proj = (cx, cy)  # 已经计算好的立方体中心
         x_proj = project_point(x_end_cam)
         y_proj = project_point(y_end_cam)
         z_proj = project_point(z_end_cam)
         
-        # 绘制坐标轴
-        if origin_proj and x_proj:
-            cv2.line(img_draw, origin_proj, x_proj, (0, 0, 255), 3)  # X轴 - 红色
-        if origin_proj and y_proj:
-            cv2.line(img_draw, origin_proj, y_proj, (0, 255, 0), 3)  # Y轴 - 绿色
-        if origin_proj and z_proj:
-            cv2.line(img_draw, origin_proj, z_proj, (255, 0, 0), 3)  # Z轴 - 蓝色
+        # 绘制坐标轴（从立方体中心点开始）
+        if center_proj and x_proj:
+            cv2.line(img_draw, center_proj, x_proj, (0, 0, 255), 3)  # X轴 - 红色
+        if center_proj and y_proj:
+            cv2.line(img_draw, center_proj, y_proj, (0, 255, 0), 3)  # Y轴 - 绿色
+        if center_proj and z_proj:
+            cv2.line(img_draw, center_proj, z_proj, (255, 0, 0), 3)  # Z轴 - 蓝色
 
 
     return img_draw
