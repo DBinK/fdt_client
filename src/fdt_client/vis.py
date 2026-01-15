@@ -133,23 +133,40 @@ def draw_dict_to_img(img, draw_dict, font_size):
     # 设置初始绘制位置（从图像左上角开始）
     start_y = 30
     offset_x = 20
-    line_height = int(30 * font_size)  # 根据字体大小调整行高
+    line_height = int(40 * font_size)  # 根据字体大小调整行高
     
-    for i, (key, value) in enumerate(draw_dict.items()):
-        # 格式化要显示的文本
+    # 先收集所有文本并计算总体尺寸
+    texts = []
+    max_text_width = 0
+    max_text_height = 0
+    
+    for key, value in draw_dict.items():
         text = f"{key}: {value}"
-        
-        # 计算文本尺寸，以便正确放置
         (text_width, text_height), baseline = cv2.getTextSize(text, font, font_size, thickness)
+        texts.append((text, text_width, text_height))
+        max_text_width = max(max_text_width, text_width)
+        max_text_height = max(max_text_height, text_height)
+    
+    # 计算实际可绘制的行数
+    total_lines = min(len(texts), (img_draw.shape[0] - start_y) // line_height)
+    
+    if total_lines > 0:
+        # 绘制半透明黑色背景矩形，贯穿整个x轴
+        background_start_y = 0  
+        background_end_y = start_y + total_lines * line_height  # 留一点间距
         
-        # 计算当前行的y坐标
+        # 创建覆盖区域的子图
+        overlay = img_draw.copy()
+        cv2.rectangle(overlay, (0, background_start_y), (img_draw.shape[1], background_end_y), (0, 0, 0), -1)
+        
+        # 使用addWeighted函数创建半透明效果
+        alpha = 0.4  # 透明度，0表示完全透明，1表示不透明
+        cv2.addWeighted(overlay, alpha, img_draw, 1 - alpha, 0, img_draw)
+    
+    # 绘制每行文本
+    for i in range(total_lines):
+        text, _, _ = texts[i]
         y_pos = start_y + i * line_height
-        
-        # 确保文本不会超出图像边界
-        if y_pos + text_height > img_draw.shape[0]:
-            break  # 如果超出图像底部，则停止绘制
-        
-        # 在图像上绘制文本
         cv2.putText(img_draw, text, (offset_x, y_pos), font, font_size, color, thickness)
     
     return img_draw

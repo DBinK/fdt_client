@@ -55,18 +55,16 @@ def track_pose(
                     color_frame=color_image,
                     depth_frame=depth_image,
                 )
-
-            # breakpoint()
             
             if not is_init:  # 未成功初始化则跳过
                 time.sleep(0.1)  # 防止 CPU 占满
                 continue
             
-            # 更新追踪
+            # 更新追踪, 核心代码
             ret, pose_cam = tracker.update(color_image, depth_image)
 
             # 对 pose 结果做其他的后处理
-            xyz_base = []
+            xyz_arm = []
             xyz_cam  = []
             if ret:
                 pose_base = cam2base(pose_cam, T_cam_to_base)
@@ -74,13 +72,13 @@ def track_pose(
                 pose_cam = np.array(pose_cam).reshape(4, 4)
                 pose_base = np.array(pose_base).reshape(4, 4)
 
-                xyz_base = pose_base[:3, 3]
+                xyz_arm = pose_base[:3, 3]
                 xyz_cam = pose_cam[:3, 3]
 
             # 打印信息
             ns = loop.tick()
             hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
-            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_base}", end='', flush=True)
+            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_arm}", end='', flush=True)
 
             # 可视化 (可选)
             if ret and vis:  
@@ -88,7 +86,7 @@ def track_pose(
                 result = {
                     "Hz": f"{hz:.2f}",
                     "xyz_cam": xyz_cam, 
-                    "xyz_base": xyz_base,
+                    "xyz_base": xyz_arm,
                 }
                 vis_image = color_image
                 vis_image = draw_dict_to_img(color_image, result, font_size=1)
