@@ -175,17 +175,53 @@ if __name__ == "__main__":
         
         print("开始采集彩色和深度图像，按 'q' 或 ESC 键退出")
         is_init = False
-        
         while True:
             # 获取图像帧
+            # color_raw, _, depth_raw = gemini_2.get_frames()
+
+            # 1. 获取数据
             color_image, depth_image, depth_data = gemini_2.get_frames()
+
+            
+            # 2. 关键：非空检查 (防止运行时报错 -215 Assertion failed)
+            if color_image is None or depth_image is None:
+                print("图像帧为空，请检查设备是否正常连接")
+                continue
+
+            # # 3. 关键：强制类型转换 (解决 Pylance 报错)
+            # # 即使 color_raw 已经是 array，这一步也能消除编辑器的类型疑虑
+            # # 同时也兼容了部分 SDK 返回的是自定义 Frame 对象的情况
+            # color_np = np.asanyarray(color_image)
+            # depth_np = np.asanyarray(depth_data)
+
+            # # 4. 颜色空间转换 (RGB -> BGR)
+            # # 现在的 color_np 肯定是合法的 numpy 数组了
+            # color_image = cv2.cvtColor(color_np, cv2.COLOR_RGB2BGR)
+            # color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
+
+            # # 5. 深度数据转换
+            # depth_image = depth_np.astype(np.uint16)
+
+
+            # color_path = "/home/zyh/wmz/our_data/processed/mangguo/1764919025923146/rgb/000001.png"
+            # depth_path = "/home/zyh/wmz/our_data/processed/mangguo/1764919025923146/depth/000001.png"
+            # # 读取为 BGR 格式
+            # color_image = cv2.imread(color_path, cv2.IMREAD_COLOR)
+
+            # # 关键：使用 IMREAD_UNCHANGED 保持 16 位精度
+            # depth_uint16 = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            # # 转换为米 (Meters)
+            # # 假设本地 PNG 的单位是毫米 (mm)，这是最常见的情况
+            # depth_image = depth_uint16.astype(np.float32)
+
+
+            if color_image is None or depth_data is None:
+                continue
+
             ns = loop.tick()
             hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
 
-            if color_image is None or depth_image is None:
-                continue
-
-            depth_image = cv2.bitwise_not(depth_image)
+            # depth_image = cv2.bitwise_not(depth_image)
             # 显示彩色图像 和 深度图像
             # cv2.imshow("Color Image", color_image)
             # cv2.imshow("Depth Image", depth_image)
@@ -199,7 +235,7 @@ if __name__ == "__main__":
                     depth_frame=depth_image,
                 )
 
-            breakpoint()
+            # breakpoint()
             
             if is_init:
                 reply = tracker.update(color_image, depth_image)
