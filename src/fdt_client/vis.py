@@ -108,10 +108,12 @@ def draw_3d_box_client(image, pose, K, bbox_3d_local):
         # 绘制坐标轴（从立方体中心点开始）
         if center_proj and x_proj:
             cv2.line(img_draw, center_proj, x_proj, (0, 0, 255), 3)  # X轴 - 红色
+            cv2.putText(img_draw, 'X', x_proj, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         if center_proj and y_proj:
             cv2.line(img_draw, center_proj, y_proj, (0, 255, 0), 3)  # Y轴 - 绿色
+            cv2.putText(img_draw, 'Y', y_proj, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         if center_proj and z_proj:
             cv2.line(img_draw, center_proj, z_proj, (255, 0, 0), 3)  # Z轴 - 蓝色
-
+            cv2.putText(img_draw, 'Z', z_proj, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
     return img_draw

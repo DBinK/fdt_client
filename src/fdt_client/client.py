@@ -97,7 +97,7 @@ class RemoteFoundationPose:
             logger.error(f"tracker 初始化失败: {reply}")
             return False
 
-    def update(self, color_frame: np.ndarray, depth_frame: np.ndarray):
+    def update(self, color_frame: np.ndarray, depth_frame: np.ndarray) -> tuple:
         if not self.initialized:
             raise RuntimeError("Tracker not initialized. Call init() first.")
         

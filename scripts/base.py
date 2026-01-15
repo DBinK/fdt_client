@@ -4,8 +4,10 @@ from pathlib import Path
 import time
 import cv2
 from looptick import LoopTick
+import numpy as np
 from rich import print as rprint
 
+from fdt_client.logger import logger
 from fdt_client.rgbd_cam import OrbbecRGBDCamera
 from fdt_client.client import RemoteFoundationPose
 from fdt_client.vis import draw_3d_box_client
@@ -18,6 +20,7 @@ def track_pose(
     mesh_file: Path | str,
     device_index: int = 1,
     server_url: str = "tcp://127.0.0.1:5555",
+    T_cam_to_base = np.eye(4),   
     vis: bool = False
 ):
     tracker = RemoteFoundationPose(server_url)
@@ -43,11 +46,6 @@ def track_pose(
                 print("图像帧为空，请检查设备是否正常连接")
                 continue
 
-            ns = loop.tick()
-            hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
-
-            print(f"\rHz: {hz:.2f}", end='', flush=True)
-
             # 初始化追踪器
             if not tracker.initialized and intrinsic is not None:
                 is_init = tracker.init(
@@ -65,12 +63,24 @@ def track_pose(
                 continue
             
             # 更新追踪
-            ret, pose = tracker.update(color_image, depth_image)
+            ret, pose_cam = tracker.update(color_image, depth_image)
+
+            # 对 pose 结果做其他的后处理
+            xyz_base = []
+            xyz_cam  = []
+            if ret:
+                pose_base = cam2base(pose_cam, T_cam_to_base)
+
+                pose_cam = np.array(pose_cam).reshape(4, 4)
+                pose_base = np.array(pose_base).reshape(4, 4)
+
+                xyz_base = pose_base[:3, 3]
+                xyz_cam = pose_cam[:3, 3]
 
             # 可视化 (可选)
             if ret and vis:  
                 # 绘制 3D 边界框
-                vis_image = draw_3d_box_client(color_image, pose, intrinsic, tracker.bbox_corners)
+                vis_image = draw_3d_box_client(color_image, pose_cam, intrinsic, tracker.bbox_corners)
                 cv2.imshow("vis_image", vis_image)
 
                 # 显示原始彩色图像 和 深度图像
@@ -82,22 +92,54 @@ def track_pose(
                 if key == ord('q') or key == 27:  # 'q' 或 ESC 键退出
                     break
             
-            # 对 pose 结果做其他的后处理
-            if ret:
-                pass
-
+            # 打印信息
+            ns = loop.tick()
+            hz = 1 / ((ns * loop.NS2SEC) if ns > 0.01 else 0.01)
+            print(f"\rHz: {hz:.2f}, xyz_cam: {xyz_cam}, xyz_base: {xyz_base}", end='', flush=True)
 
     except Exception as e:
-        print(f"程序运行出错: {e}")
+        logger.exception(f"程序运行出错: {e}")
 
     except KeyboardInterrupt:
-        print("用户中断程序")
+        logger.warning("用户中断程序")
 
     finally:
         cv2.destroyAllWindows()
         gemini_2.stop()
         tracker.release()
 
+def cam2base(pose_cam, T_cam_to_base):      
+    """
+    将相机坐标系下的物体位姿变换到机械臂基座坐标系。
+
+    参数:
+        pose_cam: 相机坐标系下的 4x4 齐次位姿矩阵。
+                  支持 list/tuple (16元素) 或 np.ndarray ((16,) 或 (4,4))。
+        T_cam_to_base: 从相机坐标系到基座坐标系的 4x4 齐次变换矩阵，
+                       满足: pose_base = T_cam_to_base @ pose_cam。
+
+    返回:
+        np.ndarray: (4, 4) 物体在基座坐标系下的位姿矩阵。
+    """
+    # 确保输入是numpy数组
+    T_cam_to_base = np.asarray(T_cam_to_base).reshape(4, 4)
+   
+    # 确保 pose 是 4x4 矩阵
+    if isinstance(pose_cam, (list, tuple)):
+        pose_cam = np.array(pose_cam).reshape(4, 4)
+    elif isinstance(pose_cam, np.ndarray):
+        if pose_cam.shape == (4, 4):
+            pass  # 已经是正确的形状
+        elif pose_cam.size == 16:
+            pose_cam = pose_cam.reshape(4, 4)
+        else:
+            raise ValueError(f"pose_cam 应该是16个元素的一维数组或4x4矩阵，当前形状为: {pose_cam.shape}")
+    else:
+        raise TypeError(f"pose_cam 类型不支持: {type(pose_cam)}")
+
+    pose_base =  T_cam_to_base @ pose_cam   # 应用 变换矩阵
+
+    return pose_base
 
 
 if __name__ == "__main__":
@@ -107,9 +149,21 @@ if __name__ == "__main__":
 
     device_index = 1
     server_url = "tcp://127.0.0.1:5555"
-    vis = False
+    vis = True
+    # vis = False
 
-    track_pose(text_prompt, mesh_file, device_index, server_url, vis)
+    MAIN_MAT = [
+        [-0.99857, 0.05338, 0.00201, 544.02],
+        [0.03946, 0.76244, -0.64586, 552.76],
+        [-0.03601, -0.64486, -0.76345, 628.56],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    MAIN_MAT = np.array(MAIN_MAT)
+
+    MAIN_MAT_converted = MAIN_MAT.copy()
+    MAIN_MAT_converted[:3, 3] /= 1000.0  # 只转换平移部分（最后列的前三个元素）
+
+    track_pose(text_prompt, mesh_file, device_index, server_url, MAIN_MAT_converted, vis)
 
     """
     python src/fdt_client/main.py --text-prompt yellow --mesh-file tmp/scaled_mesh.obj
