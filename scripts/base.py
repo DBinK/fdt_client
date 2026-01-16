@@ -55,16 +55,16 @@ def track_pose(
                     color_frame=color_image,
                     depth_frame=depth_image,
                 )
-            
-            if not is_init:  # 未成功初始化则跳过
-                time.sleep(0.1)  # 防止 CPU 占满
-                continue
+                if not is_init:      # 未成功初始化则跳过
+                    time.sleep(0.1)  # 防止 CPU 占满
+                    continue
             
             # 更新追踪, 核心代码
             ret, pose_cam = tracker.update(color_image, depth_image)
             pose_cam = np.array(pose_cam).reshape(4, 4)  # 确保为 4x4 矩阵
 
-            # 对 pose 结果做其他的后处理
+            # 对 pose 结果做其他的后处理, 可以在此处之后进行二次开发
+            ################################################
             xyz_arm = []
             xyz_cam  = []
             if ret:
@@ -73,6 +73,7 @@ def track_pose(
 
                 xyz_arm = pose_base[:3, 3]
                 xyz_cam = pose_cam[:3, 3]
+            #################################################
 
             # 打印信息
             ns = loop.tick()
